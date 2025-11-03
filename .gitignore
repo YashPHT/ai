@@ -53,6 +53,7 @@ vector_store/
 # Logs
 *.log
 logs/
+application.log
 
 # Testing
 .pytest_cache/

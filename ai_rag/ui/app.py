@@ -1,8 +1,11 @@
 import streamlit as st
 from typing import Dict
 from langchain.schema import Document
-from config import RAGConfig
-from rag_workflow import RAGWorkflow
+from ai_rag.core.logging_config import configure_logging
+from ai_rag.core.settings import settings
+from ai_rag.orchestration.rag_workflow import RAGWorkflow
+
+configure_logging()
 
 st.set_page_config(
     page_title="Enterprise RAG Q&A",
@@ -13,7 +16,7 @@ st.set_page_config(
 
 
 def authentication_hook():
-    if st.session_state.config.enable_auth:
+    if settings.enable_auth:
         if "authenticated" not in st.session_state:
             st.session_state.authenticated = False
         
@@ -35,7 +38,7 @@ def authentication_hook():
 
 def initialize_session_state():
     if "config" not in st.session_state:
-        st.session_state.config = RAGConfig.from_env()
+        st.session_state.config = settings
     
     if "workflow" not in st.session_state:
         try:

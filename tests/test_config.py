@@ -1,6 +1,6 @@
 import os
 import pytest
-from config import RAGConfig
+from ai_rag.core.settings import Settings
 
 
 def test_config_from_env():
@@ -8,7 +8,7 @@ def test_config_from_env():
     os.environ["ENVIRONMENT"] = "test"
     os.environ["RETRIEVER_TOP_K"] = "10"
     
-    config = RAGConfig.from_env()
+    config = Settings.from_env()
     
     assert config.google_api_key == "test_key"
     assert config.environment == "test"
@@ -19,7 +19,7 @@ def test_config_from_env():
 
 
 def test_config_validation_success():
-    config = RAGConfig(google_api_key="valid_key")
+    config = Settings(google_api_key="valid_key")
     is_valid, error = config.validate()
     
     assert is_valid is True
@@ -27,7 +27,7 @@ def test_config_validation_success():
 
 
 def test_config_validation_missing_api_key():
-    config = RAGConfig(google_api_key="")
+    config = Settings(google_api_key="")
     is_valid, error = config.validate()
     
     assert is_valid is False
@@ -35,7 +35,7 @@ def test_config_validation_missing_api_key():
 
 
 def test_config_validation_invalid_top_k():
-    config = RAGConfig(google_api_key="valid_key", retriever_top_k=0)
+    config = Settings(google_api_key="valid_key", retriever_top_k=0)
     is_valid, error = config.validate()
     
     assert is_valid is False
@@ -43,7 +43,7 @@ def test_config_validation_invalid_top_k():
 
 
 def test_config_validation_requires_pinecone_api_key_when_enabled():
-    config = RAGConfig(
+    config = Settings(
         google_api_key="valid_key",
         enable_pinecone_retriever=True,
         pinecone_api_key="",

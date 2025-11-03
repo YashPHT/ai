@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 from langchain.schema import Document
 
-from retrieval import (
+from ai_rag.retrieval import (
     GraphRetriever,
     PineconeEmbeddingPipeline,
     PineconeIndexManager,

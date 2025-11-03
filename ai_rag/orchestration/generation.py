@@ -6,13 +6,13 @@ from langchain.schema import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from config import RAGConfig
+from ai_rag.core.settings import Settings
 
 
 class GeminiRAG:
     """Handles the generation phase of the RAG pipeline using Google Gemini."""
 
-    def __init__(self, config: RAGConfig, llm: ChatGoogleGenerativeAI):
+    def __init__(self, config: Settings, llm: ChatGoogleGenerativeAI):
         self.config = config
         self.llm = llm
         self.logger = logging.getLogger(self.__class__.__name__)

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from langchain.schema import Document as LCDocument
 
-from ingestion import (
+from ai_rag.ingestion import (
     PDFIngestor,
     StructuredDataIngestor,
     WebsiteIngestor,
