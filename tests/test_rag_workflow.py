@@ -2,9 +2,9 @@ import pytest
 from unittest.mock import MagicMock, patch
 from langchain.schema import Document
 
-from config import RAGConfig
-from fusion import FusionPipeline, KeywordOverlapReranker
-from rag_workflow import RAGWorkflow, RAGState
+from ai_rag.core.settings import Settings
+from ai_rag.ranking.fusion import FusionPipeline, KeywordOverlapReranker
+from ai_rag.orchestration.rag_workflow import RAGWorkflow, RAGState
 
 
 @pytest.fixture
@@ -16,8 +16,8 @@ def sample_documents() -> list[Document]:
 
 
 @pytest.fixture
-def mock_config() -> RAGConfig:
-    return RAGConfig(
+def mock_config() -> Settings:
+    return Settings(
         google_api_key="test_key",
         environment="test",
         retriever_top_k=2,
@@ -26,7 +26,7 @@ def mock_config() -> RAGConfig:
 
 
 @pytest.fixture
-def mock_workflow(mock_config: RAGConfig, sample_documents: list[Document]) -> RAGWorkflow:
+def mock_workflow(mock_config: Settings, sample_documents: list[Document]) -> RAGWorkflow:
     llm = MagicMock()
     embeddings = MagicMock()
     vector_store = MagicMock()
@@ -101,7 +101,7 @@ def test_workflow_executes_end_to_end(mock_workflow: RAGWorkflow) -> None:
     assert diagnostics["token_usage"] >= 0
 
 
-def test_workflow_fallback_when_no_documents(mock_config: RAGConfig) -> None:
+def test_workflow_fallback_when_no_documents(mock_config: Settings) -> None:
     llm = MagicMock()
     embeddings = MagicMock()
     vector_store = MagicMock()
@@ -138,7 +138,7 @@ def test_ingest_documents_splits_and_persists(
     mock_workflow.sentence_window_retriever = MagicMock()
     mock_workflow.graph_retriever = MagicMock()
 
-    with patch("rag_workflow.RecursiveCharacterTextSplitter") as mock_splitter_cls:
+    with patch("ai_rag.orchestration.rag_workflow.RecursiveCharacterTextSplitter") as mock_splitter_cls:
         mock_splitter = MagicMock()
         mock_splitter.split_documents.return_value = sample_documents
         mock_splitter_cls.return_value = mock_splitter

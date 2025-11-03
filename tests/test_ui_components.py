@@ -1,63 +1,40 @@
+import importlib
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import Mock, patch, MagicMock
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
-def test_imports():
-    try:
-        import app
-        import config
-        import rag_workflow
-        assert True
-    except ImportError as e:
-        pytest.fail(f"Import failed: {e}")
+def test_core_modules_importable() -> None:
+    assert importlib.import_module("ai_rag.core.settings")
+    assert importlib.import_module("ai_rag.orchestration.rag_workflow")
+    assert importlib.import_module("ai_rag.ui.app")
 
 
-def test_config_initialization():
-    from config import RAGConfig
-    
-    config = RAGConfig(
-        google_api_key="test_key",
-        environment="test"
-    )
-    
-    assert config.google_api_key == "test_key"
-    assert config.environment == "test"
+def test_settings_defaults() -> None:
+    from ai_rag.core.settings import Settings
+
+    settings = Settings(google_api_key="key")
+
+    assert settings.environment == "local"
+    assert settings.retriever_top_k == 5
+    assert settings.embedding_model
 
 
-@patch('streamlit.set_page_config')
-@patch('streamlit.session_state', new_callable=MagicMock)
-def test_app_page_config(mock_session_state, mock_set_page_config):
-    with patch.dict(sys.modules, {'streamlit': MagicMock()}):
-        try:
-            import app
-            assert True
-        except Exception as e:
-            pytest.fail(f"App initialization failed: {e}")
+@patch("streamlit.set_page_config")
+@patch("streamlit.session_state", new_callable=MagicMock)
+def test_streamlit_app_initializes(mock_session_state: MagicMock, mock_set_page_config: MagicMock) -> None:
+    fake_streamlit = MagicMock()
+    fake_streamlit.session_state = mock_session_state
+    fake_streamlit.set_page_config = mock_set_page_config
+
+    with patch.dict("sys.modules", {"streamlit": fake_streamlit}):
+        module = importlib.import_module("ai_rag.ui.app")
+        assert hasattr(module, "initialize_session_state")
 
 
-def test_authentication_hook_disabled():
-    from config import RAGConfig
-    
-    config = RAGConfig(google_api_key="test_key", enable_auth=False)
-    
-    assert config.enable_auth is False
+def test_rag_state_structure() -> None:
+    from ai_rag.orchestration.rag_workflow import RAGState
 
-
-def test_authentication_hook_enabled():
-    from config import RAGConfig
-    
-    config = RAGConfig(google_api_key="test_key", enable_auth=True)
-    
-    assert config.enable_auth is True
-
-
-def test_rag_state_structure():
-    from rag_workflow import RAGState
-    
     state: RAGState = {
         "question": "Test question",
         "documents": [],
@@ -65,9 +42,9 @@ def test_rag_state_structure():
         "answer": "",
         "citations": [],
         "status_messages": [],
-        "retriever_weights": {"semantic": 1.0}
+        "retriever_weights": {"semantic": 1.0},
     }
-    
+
     assert "question" in state
     assert "documents" in state
     assert "answer" in state

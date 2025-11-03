@@ -1,6 +1,6 @@
 from langchain.schema import Document
 
-from fusion import FusionPipeline, KeywordOverlapReranker
+from ai_rag.ranking.fusion import FusionPipeline, KeywordOverlapReranker
 
 
 def test_fusion_pipeline_weighted_rrf_orders_documents() -> None:

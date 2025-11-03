@@ -4,7 +4,7 @@ from operator import add
 from typing import Annotated, Any, Callable, Dict, List, Optional, Sequence, TypedDict, Union
 
 from langchain.schema import Document
-from ingestion import (
+from ai_rag.ingestion import (
     Chunk as IngestionChunk,
     Document as IngestionDocument,
     as_langchain_documents,
@@ -14,10 +14,10 @@ from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmb
 from langchain_community.vectorstores import Chroma
 from langgraph.graph import END, StateGraph
 
-from config import RAGConfig
-from fusion import FusionPipeline, FusionReranker, KeywordOverlapReranker
-from generation import GeminiRAG
-from retrieval import (
+from ai_rag.core.settings import Settings
+from ai_rag.ranking.fusion import FusionPipeline, FusionReranker, KeywordOverlapReranker
+from ai_rag.orchestration.generation import GeminiRAG
+from ai_rag.retrieval import (
     GraphRetriever,
     PineconeEmbeddingPipeline,
     PineconeIndexManager,
@@ -53,7 +53,7 @@ class RAGWorkflow:
 
     def __init__(
         self,
-        config: RAGConfig,
+        config: Settings,
         *,
         llm: Optional[ChatGoogleGenerativeAI] = None,
         embeddings: Optional[GoogleGenerativeAIEmbeddings] = None,

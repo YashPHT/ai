@@ -1,17 +1,16 @@
-from __future__ import annotations
+"""Document ingestion pipelines."""
 
 from .converters import as_langchain_documents
-from .models import Chunk, Document, IngestionResult
+from .models import Chunk, Document
 from .pdf import PDFIngestor
 from .structured import StructuredDataIngestor
 from .web import WebsiteIngestor
 
 __all__ = [
-    "as_langchain_documents",
     "Chunk",
     "Document",
-    "IngestionResult",
     "PDFIngestor",
     "StructuredDataIngestor",
     "WebsiteIngestor",
+    "as_langchain_documents",
 ]

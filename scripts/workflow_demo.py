@@ -12,11 +12,11 @@ from unittest.mock import MagicMock
 
 from langchain.schema import Document
 
-from config import RAGConfig
-from rag_workflow import RAGWorkflow
+from ai_rag.core.settings import Settings
+from ai_rag.orchestration.rag_workflow import RAGWorkflow
 
 
-def build_mock_workflow(config: RAGConfig) -> RAGWorkflow:
+def build_mock_workflow(config: Settings) -> RAGWorkflow:
     mock_llm = MagicMock()
     mock_llm.invoke.return_value = MagicMock(
         content="This is a synthesized answer referencing [1]."
@@ -57,7 +57,7 @@ def build_mock_workflow(config: RAGConfig) -> RAGWorkflow:
 def main() -> None:
     os.environ.setdefault("GOOGLE_API_KEY", "dummy-key")
 
-    config = RAGConfig.from_env()
+    config = Settings.from_env()
     config.enable_graph_retriever = True
     config.enable_telemetry = False
     config.retriever_top_k = 2
