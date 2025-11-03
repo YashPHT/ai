@@ -15,6 +15,9 @@ class RAGConfig:
     chunk_size: int = 1000
     chunk_overlap: int = 200
     vector_store_path: str = "./chroma_db"
+    enable_graph_retriever: bool = False
+    graph_retriever_top_k: int = 3
+    enable_telemetry: bool = False
     
     @classmethod
     def from_env(cls) -> "RAGConfig":
@@ -26,6 +29,9 @@ class RAGConfig:
             chunk_size=int(os.getenv("CHUNK_SIZE", "1000")),
             chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "200")),
             vector_store_path=os.getenv("VECTOR_STORE_PATH", "./chroma_db"),
+            enable_graph_retriever=os.getenv("ENABLE_GRAPH_RETRIEVER", "false").lower() == "true",
+            graph_retriever_top_k=int(os.getenv("GRAPH_RETRIEVER_TOP_K", "3")),
+            enable_telemetry=os.getenv("ENABLE_TELEMETRY", "false").lower() == "true",
         )
     
     def validate(self) -> tuple[bool, Optional[str]]:
@@ -35,4 +41,6 @@ class RAGConfig:
             return False, "RETRIEVER_TOP_K must be positive"
         if self.chunk_size <= 0:
             return False, "CHUNK_SIZE must be positive"
+        if self.graph_retriever_top_k <= 0:
+            return False, "GRAPH_RETRIEVER_TOP_K must be positive"
         return True, None
