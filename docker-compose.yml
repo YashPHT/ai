@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  streamlit-rag:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - ENVIRONMENT=${ENVIRONMENT:-local}
+      - ENABLE_AUTH=${ENABLE_AUTH:-false}
+      - RETRIEVER_TOP_K=${RETRIEVER_TOP_K:-5}
+      - CHUNK_SIZE=${CHUNK_SIZE:-1000}
+      - CHUNK_OVERLAP=${CHUNK_OVERLAP:-200}
+    volumes:
+      - ./chroma_db:/app/chroma_db
+    restart: unless-stopped
