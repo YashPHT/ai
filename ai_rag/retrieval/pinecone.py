@@ -128,6 +128,24 @@ class PineconeIndexManager:
             self.create_index(metric=metric, **kwargs)
         return self._resolve_index()
 
+    def get_index_stats(self) -> Dict[str, Any]:
+        """Retrieve index statistics including vector count."""
+        index = self._resolve_index()
+        if not hasattr(index, "describe_index_stats"):
+            return {"total_vector_count": 0, "namespaces": {}}
+        
+        try:
+            stats = index.describe_index_stats()
+            if isinstance(stats, dict):
+                return stats
+            return {
+                "total_vector_count": getattr(stats, "total_vector_count", 0),
+                "namespaces": getattr(stats, "namespaces", {}),
+            }
+        except Exception as error:
+            self.logger.warning("Failed to get index stats: %s", error)
+            return {"total_vector_count": 0, "namespaces": {}}
+
     # ------------------------------------------------------------------
     # Vector operations
     # ------------------------------------------------------------------
@@ -186,6 +204,10 @@ class PineconeEmbeddingPipeline:
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
         )
+
+    def run(self, documents: Sequence[Document]) -> int:
+        """Process and upsert documents into Pinecone (alias for upsert_documents)."""
+        return self.upsert_documents(documents)
 
     def upsert_documents(self, documents: Sequence[Document]) -> int:
         if not documents:

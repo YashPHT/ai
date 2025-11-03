@@ -11,7 +11,6 @@ from ai_rag.ingestion import (
 )
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from langchain_community.vectorstores import Chroma
 from langgraph.graph import END, StateGraph
 
 from ai_rag.core.settings import Settings
@@ -57,7 +56,7 @@ class RAGWorkflow:
         *,
         llm: Optional[ChatGoogleGenerativeAI] = None,
         embeddings: Optional[GoogleGenerativeAIEmbeddings] = None,
-        vector_store: Optional[Chroma] = None,
+        vector_store: Optional[Any] = None,
         fusion_reranker: Optional[FusionReranker] = None,
         pinecone_manager: Optional[PineconeIndexManager] = None,
         pinecone_pipeline: Optional[PineconeEmbeddingPipeline] = None,
@@ -80,7 +79,6 @@ class RAGWorkflow:
         self.llm = llm or ChatGoogleGenerativeAI(model="gemini-pro", temperature=0.3)
         self.gemini_rag = GeminiRAG(config=self.config, llm=self.llm)
 
-        self.vector_store = vector_store
         self.pinecone_index_manager = pinecone_manager
         self.pinecone_pipeline = pinecone_pipeline
         self.pinecone_retriever = pinecone_retriever
@@ -89,9 +87,13 @@ class RAGWorkflow:
         self._retriever_dispatch: Dict[str, Callable[[str, float], List[Document]]] = {}
         self._retriever_order: List[str] = []
         self._event_handlers: List[Callable[[str, Dict[str, Any]], None]] = []
+        
+        self._mock_vector_store = vector_store
 
-        if self.vector_store is None:
+        if vector_store is None and pinecone_retriever is None:
             self._initialize_vector_store()
+        elif vector_store is not None:
+            self.logger.info("Using provided mock vector store (backwards compatibility)")
 
         reranker_instance = fusion_reranker
         if reranker_instance is None and self.config.enable_fusion_reranker:
@@ -129,17 +131,40 @@ class RAGWorkflow:
                 self.logger.warning("Telemetry handler error: %s", exc)
 
     def _initialize_vector_store(self) -> None:
+        """Initialize Pinecone as the primary vector store."""
         try:
-            self.vector_store = Chroma(
-                persist_directory=self.config.vector_store_path,
-                embedding_function=self.embeddings,
-            )
+            if self.pinecone_index_manager is None:
+                self.pinecone_index_manager = PineconeIndexManager(
+                    index_name=self.config.pinecone_index_name,
+                    dimension=self.config.pinecone_dimension,
+                    api_key=self.config.pinecone_api_key or None,
+                    environment=self.config.pinecone_environment or None,
+                    namespace=self.config.pinecone_namespace,
+                    logger=self.logger,
+                )
+            if self.pinecone_pipeline is None:
+                self.pinecone_pipeline = PineconeEmbeddingPipeline(
+                    index_manager=self.pinecone_index_manager,
+                    embeddings=self.embeddings,
+                    chunk_size=self.config.chunk_size,
+                    chunk_overlap=self.config.chunk_overlap,
+                    batch_size=self.config.pinecone_batch_size,
+                    namespace=self.config.pinecone_namespace,
+                    logger=self.logger,
+                )
+            if self.pinecone_retriever is None:
+                self.pinecone_retriever = PineconeRetriever(
+                    index_manager=self.pinecone_index_manager,
+                    embeddings=self.embeddings,
+                    top_k=self.config.pinecone_top_k,
+                    namespace=self.config.pinecone_namespace,
+                )
+            self.logger.info("Pinecone vector store initialized successfully")
         except Exception as error:
-            self.logger.warning("Error initializing vector store: %s", error)
-            self.vector_store = Chroma(
-                embedding_function=self.embeddings,
-                persist_directory=self.config.vector_store_path,
-            )
+            self.logger.warning("Failed to initialize Pinecone vector store: %s", error)
+            self.pinecone_index_manager = None
+            self.pinecone_pipeline = None
+            self.pinecone_retriever = None
 
     def _register_retriever(
         self, name: str, handler: Callable[[str, float], List[Document]]
@@ -154,40 +179,8 @@ class RAGWorkflow:
 
         self._register_retriever("semantic", self._semantic_retrieval)
 
-        if self.config.enable_pinecone_retriever:
-            try:
-                if self.pinecone_index_manager is None:
-                    self.pinecone_index_manager = PineconeIndexManager(
-                        index_name=self.config.pinecone_index_name,
-                        dimension=self.config.pinecone_dimension,
-                        api_key=self.config.pinecone_api_key or None,
-                        environment=self.config.pinecone_environment or None,
-                        namespace=self.config.pinecone_namespace,
-                        logger=self.logger,
-                    )
-                if self.pinecone_pipeline is None:
-                    self.pinecone_pipeline = PineconeEmbeddingPipeline(
-                        index_manager=self.pinecone_index_manager,
-                        embeddings=self.embeddings,
-                        chunk_size=self.config.chunk_size,
-                        chunk_overlap=self.config.chunk_overlap,
-                        batch_size=self.config.pinecone_batch_size,
-                        namespace=self.config.pinecone_namespace,
-                        logger=self.logger,
-                    )
-                if self.pinecone_retriever is None:
-                    self.pinecone_retriever = PineconeRetriever(
-                        index_manager=self.pinecone_index_manager,
-                        embeddings=self.embeddings,
-                        top_k=self.config.pinecone_top_k,
-                        namespace=self.config.pinecone_namespace,
-                    )
-                self._register_retriever("pinecone", self._pinecone_retrieval)
-            except Exception as error:
-                self.logger.warning("Failed to initialize Pinecone retriever: %s", error)
-                self.pinecone_index_manager = None
-                self.pinecone_pipeline = None
-                self.pinecone_retriever = None
+        if self.config.enable_pinecone_retriever and self.pinecone_retriever:
+            self._register_retriever("pinecone", self._pinecone_retrieval)
 
         if self.sentence_window_retriever is None:
             self.sentence_window_retriever = SentenceWindowRetriever(
@@ -261,19 +254,32 @@ class RAGWorkflow:
         )
 
     def _get_index_count(self) -> int:
-        if not self.vector_store:
+        if self._mock_vector_store is not None:
+            collection = getattr(self._mock_vector_store, "_collection", None)
+            if collection and hasattr(collection, "count"):
+                try:
+                    return int(collection.count())
+                except Exception:
+                    return 0
+            return 0
+        
+        if not self.pinecone_index_manager:
             return 0
 
-        collection = getattr(self.vector_store, "_collection", None)
-        if collection and hasattr(collection, "count"):
-            try:
-                return int(collection.count())
-            except Exception:
-                return 0
-        return 0
+        try:
+            stats = self.pinecone_index_manager.get_index_stats()
+            total_count = stats.get("total_vector_count", 0)
+            namespace_stats = stats.get("namespaces", {})
+            namespace_count = namespace_stats.get(self.config.pinecone_namespace, {}).get("vector_count", 0)
+            return max(total_count, namespace_count)
+        except Exception:
+            return 0
 
     def _ensure_vector_store_seeded(self) -> None:
-        if not self.vector_store:
+        if self._mock_vector_store is not None:
+            return
+        
+        if not self.pinecone_index_manager:
             return
 
         if self._get_index_count() == 0:
@@ -284,7 +290,7 @@ class RAGWorkflow:
         normalized_question = " ".join(question.split())
 
         status_messages = list(state.get("status_messages", []))
-        status_messages.append("📥 Received query for processing")
+        status_messages.append("[INPUT] Received query for processing")
 
         self.logger.info("Received question: %s", normalized_question)
         self._emit_event("query.intake", {"question": normalized_question})
@@ -301,11 +307,11 @@ class RAGWorkflow:
         current_count = self._get_index_count()
 
         if current_count == 0:
-            status_messages.append("📂 Knowledge index empty - loading sample corpus")
+            status_messages.append("[INDEXING] Knowledge index empty - loading sample corpus")
             self._load_sample_documents()
             current_count = self._get_index_count()
         else:
-            status_messages.append(f"📦 Knowledge index ready with {current_count} documents")
+            status_messages.append(f"[INDEXING] Knowledge index ready with {current_count} documents")
 
         self._emit_event("ingestion.status", {"document_count": current_count})
         return {**state, "status_messages": status_messages}
@@ -323,7 +329,7 @@ class RAGWorkflow:
             active_retrievers = dispatch_order[:1]
 
         status_messages.append(
-            f"🔀 Fan-out to retrievers: {', '.join(active_retrievers)}"
+            f"[RETRIEVAL] Fan-out to retrievers: {', '.join(active_retrievers)}"
         )
 
         retriever_results = dict(state.get("retriever_results", {}))
@@ -334,14 +340,14 @@ class RAGWorkflow:
                 documents = self._run_retriever(retriever_name, state, retriever_weights)
                 retriever_results[retriever_name] = documents
                 status_messages.append(
-                    f"🔎 {retriever_name.replace('_', ' ').title()} retriever returned {len(documents)} documents"
+                    f"[RETRIEVAL] {retriever_name.replace('_', ' ').title()} retriever returned {len(documents)} documents"
                 )
                 self._emit_event(
                     "retriever.success",
                     {"name": retriever_name, "count": len(documents)},
                 )
             except Exception as error:  # pragma: no cover - defensive branch
-                message = f"❌ {retriever_name.replace('_', ' ').title()} retriever failed: {error}"
+                message = f"[ERROR] {retriever_name.replace('_', ' ').title()} retriever failed: {error}"
                 status_messages.append(message)
                 errors.append(f"{retriever_name}: {error}")
                 self.logger.warning(message)
@@ -379,35 +385,49 @@ class RAGWorkflow:
     def _semantic_retrieval(self, question: str, weight: float) -> List[Document]:
         if not question.strip():
             return []
-        if not self.vector_store:
-            raise RuntimeError("Vector store not initialized")
 
         effective_weight = max(weight, 0.0)
         if effective_weight <= 0:
             return []
 
         top_k = max(1, min(int(self.config.retriever_top_k * max(effective_weight, 0.1)), 50))
-        documents: List[Document] = []
-
-        with_score = getattr(self.vector_store, "similarity_search_with_score", None)
-        if callable(with_score):
-            results = with_score(question, k=top_k)
-            for doc, score in results:
+        
+        if self._mock_vector_store is not None:
+            with_score = getattr(self._mock_vector_store, "similarity_search_with_score", None)
+            if callable(with_score):
+                results = with_score(question, k=top_k)
+                documents: List[Document] = []
+                for doc, score in results:
+                    metadata = dict(doc.metadata or {})
+                    try:
+                        metadata["score"] = float(score)
+                    except (TypeError, ValueError):
+                        metadata["score"] = score
+                    metadata["retriever"] = "semantic"
+                    documents.append(Document(page_content=doc.page_content, metadata=metadata))
+                return documents
+            
+            raw_docs = self._mock_vector_store.similarity_search(question, k=top_k)
+            documents = []
+            for doc in raw_docs:
                 metadata = dict(doc.metadata or {})
-                try:
-                    metadata["score"] = float(score)
-                except (TypeError, ValueError):
-                    metadata["score"] = score
+                metadata.setdefault("score", 0.0)
                 metadata["retriever"] = "semantic"
                 documents.append(Document(page_content=doc.page_content, metadata=metadata))
             return documents
-
-        raw_docs = self.vector_store.similarity_search(question, k=top_k)
-        for doc in raw_docs:
+        
+        if not self.pinecone_retriever:
+            raise RuntimeError("Vector store not initialized")
+        
+        results = self.pinecone_retriever.retrieve(question, k=top_k)
+        
+        documents = []
+        for result in results:
+            doc = result.to_document()
             metadata = dict(doc.metadata or {})
-            metadata.setdefault("score", 0.0)
             metadata["retriever"] = "semantic"
             documents.append(Document(page_content=doc.page_content, metadata=metadata))
+        
         return documents
 
     def _pinecone_retrieval(self, question: str, weight: float) -> List[Document]:
@@ -471,7 +491,7 @@ class RAGWorkflow:
         fused_documents = fusion_result.documents
 
         message = (
-            f"🧮 Fused {fusion_result.total_candidates} documents into "
+            f"[FUSION] Fused {fusion_result.total_candidates} documents into "
             f"{len(fused_documents)} ranked results"
         )
         if fusion_result.truncated:
@@ -479,11 +499,11 @@ class RAGWorkflow:
         status_messages.append(message)
 
         if fusion_result.metadata.get("reranker_applied"):
-            status_messages.append("📊 Fusion reranker applied to refine ordering")
+            status_messages.append("[FUSION] Fusion reranker applied to refine ordering")
 
         token_budget = fusion_result.metadata.get("token_budget")
         if token_budget is not None:
-            usage_message = f"⚖️ Context token usage {fusion_result.token_usage}"
+            usage_message = f"[FUSION] Context token usage {fusion_result.token_usage}"
             if token_budget:
                 usage_message += f"/{token_budget}"
             if fusion_result.truncated:
@@ -525,7 +545,7 @@ class RAGWorkflow:
 
     def handle_no_results(self, state: RAGState) -> RAGState:
         status_messages = list(state.get("status_messages", []))
-        message = "⚠️ No relevant documents found. Returning fallback guidance."
+        message = "[WARNING] No relevant documents found. Returning fallback guidance."
         status_messages.append(message)
 
         fallback_answer = (
@@ -550,7 +570,7 @@ class RAGWorkflow:
             return {**state, "answer": "No documents found to answer the question."}
 
         status_messages = list(state.get("status_messages", []))
-        status_messages.append("🧠 Generating final answer...")
+        status_messages.append("[GENERATION] Generating final answer...")
 
         generation_result = self.gemini_rag.generate_answer(question, documents)
 
@@ -580,7 +600,7 @@ class RAGWorkflow:
         fallback_reason = "No documents were retrieved to answer the query."
 
         self.logger.warning("No documents retrieved for: %s", question)
-        status_messages.append(f"⚠️ {fallback_reason}")
+        status_messages.append(f"[WARNING] {fallback_reason}")
         self._emit_event(
             "generation.fallback",
             {"question": question, "errors": error_str, "reason": fallback_reason},
@@ -611,9 +631,6 @@ class RAGWorkflow:
 
         langchain_docs = as_langchain_documents(documents)
         chunks = text_splitter.split_documents(langchain_docs)
-
-        if self.vector_store:
-            self.vector_store.add_documents(chunks)
 
         if self.pinecone_pipeline:
             try:
@@ -690,3 +707,49 @@ class RAGWorkflow:
             {"question": query, "status_messages": [], "errors": []},
             config=config,
         )
+
+    def run(
+        self, query: str, retriever_weights: Optional[Dict[str, float]] = None
+    ) -> RAGState:
+        """Execute the RAG workflow with specified retriever weights."""
+        config = {"recursion_limit": 10}
+        initial_state: RAGState = {
+            "question": query,
+            "status_messages": [],
+            "errors": [],
+            "retriever_weights": retriever_weights or {"semantic": 1.0},
+        }
+        
+        result = self.workflow.invoke(initial_state, config=config)
+        
+        status_messages = list(result.get("status_messages", []))
+        status_messages.append("[SUCCESS] Response ready for presentation")
+        result["status_messages"] = status_messages
+        
+        return result
+
+    def refresh_index(self) -> bool:
+        """Refresh the Pinecone index statistics."""
+        if not self.pinecone_index_manager:
+            return False
+        
+        try:
+            self.pinecone_index_manager.get_index_stats()
+            return True
+        except Exception as error:
+            self.logger.warning("Failed to refresh index: %s", error)
+            return False
+
+    def describe_graph(self) -> Dict[str, Any]:
+        """Return a description of the workflow graph structure."""
+        return {
+            "nodes": [{"name": node} for node in self._graph_nodes],
+            "edges": [
+                {
+                    "source": edge["source"],
+                    "target": edge["target"],
+                    "condition": edge.get("condition"),
+                }
+                for edge in self._graph_edges
+            ],
+        }

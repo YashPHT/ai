@@ -46,6 +46,7 @@ def configure_logging(log_level: str | None = None) -> None:
                 "class": "logging.StreamHandler",
                 "formatter": "standard",
                 "filters": ["request_id"],
+                "encoding": "utf-8",
             },
             "file": {
                 "class": "logging.handlers.RotatingFileHandler",
@@ -54,6 +55,7 @@ def configure_logging(log_level: str | None = None) -> None:
                 "filename": log_directory / "application.log",
                 "maxBytes": 10 * 1024 * 1024,
                 "backupCount": 5,
+                "encoding": "utf-8",
             },
         },
         "root": {

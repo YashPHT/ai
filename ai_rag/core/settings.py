@@ -27,7 +27,6 @@ class Settings(BaseSettings):
     retriever_top_k: int = Field(5, description="Number of documents to retrieve")
     chunk_size: int = Field(1000, description="Document chunk size")
     chunk_overlap: int = Field(200, description="Overlap between chunks")
-    vector_store_path: str = Field("./chroma_db", description="Path to ChromaDB storage")
 
     enable_pinecone_retriever: bool = Field(False, description="Enable Pinecone retriever")
     pinecone_namespace: str = Field("default", description="Pinecone namespace")
