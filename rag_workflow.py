@@ -11,6 +11,13 @@ from langgraph.graph import END, StateGraph
 
 from config import RAGConfig
 from fusion import FusionPipeline, FusionReranker, KeywordOverlapReranker
+from retrieval import (
+    GraphRetriever,
+    PineconeEmbeddingPipeline,
+    PineconeIndexManager,
+    PineconeRetriever,
+    SentenceWindowRetriever,
+)
 
 
 class RAGState(TypedDict, total=False):
@@ -43,6 +50,11 @@ class RAGWorkflow:
         embeddings: Optional[GoogleGenerativeAIEmbeddings] = None,
         vector_store: Optional[Chroma] = None,
         fusion_reranker: Optional[FusionReranker] = None,
+        pinecone_manager: Optional[PineconeIndexManager] = None,
+        pinecone_pipeline: Optional[PineconeEmbeddingPipeline] = None,
+        pinecone_retriever: Optional[PineconeRetriever] = None,
+        sentence_window_retriever: Optional[SentenceWindowRetriever] = None,
+        graph_retriever: Optional[GraphRetriever] = None,
     ) -> None:
         self.config = config
         os.environ["GOOGLE_API_KEY"] = config.google_api_key
@@ -59,6 +71,13 @@ class RAGWorkflow:
         self.llm = llm or ChatGoogleGenerativeAI(model="gemini-pro", temperature=0.3)
 
         self.vector_store = vector_store
+        self.pinecone_index_manager = pinecone_manager
+        self.pinecone_pipeline = pinecone_pipeline
+        self.pinecone_retriever = pinecone_retriever
+        self.sentence_window_retriever = sentence_window_retriever
+        self.graph_retriever = graph_retriever
+        self._retriever_dispatch: Dict[str, Callable[[str, float], List[Document]]] = {}
+        self._retriever_order: List[str] = []
         self._event_handlers: List[Callable[[str, Dict[str, Any]], None]] = []
 
         if self.vector_store is None:
@@ -76,6 +95,9 @@ class RAGWorkflow:
             reranker_weight=self.config.fusion_reranker_weight,
             logger=self.logger,
         )
+
+        self._initialize_retrievers()
+        self._ensure_vector_store_seeded()
 
         self._graph_nodes: List[str] = []
         self._graph_edges: List[Dict[str, Optional[str]]] = []
@@ -102,16 +124,84 @@ class RAGWorkflow:
                 persist_directory=self.config.vector_store_path,
                 embedding_function=self.embeddings,
             )
-
-            if self._get_index_count() == 0:
-                self._load_sample_documents()
         except Exception as error:
             self.logger.warning("Error initializing vector store: %s", error)
             self.vector_store = Chroma(
                 embedding_function=self.embeddings,
                 persist_directory=self.config.vector_store_path,
             )
-            self._load_sample_documents()
+
+    def _register_retriever(
+        self, name: str, handler: Callable[[str, float], List[Document]]
+    ) -> None:
+        self._retriever_dispatch[name] = handler
+        if name not in self._retriever_order:
+            self._retriever_order.append(name)
+
+    def _initialize_retrievers(self) -> None:
+        self._retriever_dispatch.clear()
+        self._retriever_order.clear()
+
+        self._register_retriever("semantic", self._semantic_retrieval)
+
+        if self.config.enable_pinecone_retriever:
+            try:
+                if self.pinecone_index_manager is None:
+                    self.pinecone_index_manager = PineconeIndexManager(
+                        index_name=self.config.pinecone_index_name,
+                        dimension=self.config.pinecone_dimension,
+                        api_key=self.config.pinecone_api_key or None,
+                        environment=self.config.pinecone_environment or None,
+                        namespace=self.config.pinecone_namespace,
+                        logger=self.logger,
+                    )
+                if self.pinecone_pipeline is None:
+                    self.pinecone_pipeline = PineconeEmbeddingPipeline(
+                        index_manager=self.pinecone_index_manager,
+                        embeddings=self.embeddings,
+                        chunk_size=self.config.chunk_size,
+                        chunk_overlap=self.config.chunk_overlap,
+                        batch_size=self.config.pinecone_batch_size,
+                        namespace=self.config.pinecone_namespace,
+                        logger=self.logger,
+                    )
+                if self.pinecone_retriever is None:
+                    self.pinecone_retriever = PineconeRetriever(
+                        index_manager=self.pinecone_index_manager,
+                        embeddings=self.embeddings,
+                        top_k=self.config.pinecone_top_k,
+                        namespace=self.config.pinecone_namespace,
+                    )
+                self._register_retriever("pinecone", self._pinecone_retrieval)
+            except Exception as error:
+                self.logger.warning("Failed to initialize Pinecone retriever: %s", error)
+                self.pinecone_index_manager = None
+                self.pinecone_pipeline = None
+                self.pinecone_retriever = None
+
+        if self.sentence_window_retriever is None:
+            self.sentence_window_retriever = SentenceWindowRetriever(
+                window_size=self.config.sentence_window_size,
+                top_k=self.config.sentence_retriever_top_k,
+            )
+        else:
+            self.sentence_window_retriever.window_size = max(0, self.config.sentence_window_size)
+            self.sentence_window_retriever.top_k = max(1, self.config.sentence_retriever_top_k)
+
+        if self.config.enable_sentence_window_retriever:
+            self._register_retriever("sentence_window", self._sentence_window_retrieval)
+
+        if self.graph_retriever is None:
+            self.graph_retriever = GraphRetriever(
+                max_depth=self.config.graph_max_depth,
+                top_k=self.config.graph_retriever_top_k,
+            )
+        else:
+            self.graph_retriever.max_depth = max(1, self.config.graph_max_depth)
+            self.graph_retriever.top_k = max(1, self.config.graph_retriever_top_k)
+
+        if self.config.enable_graph_retriever:
+            self._register_retriever("graph", self._graph_retrieval)
 
     def _load_sample_documents(self) -> None:
         sample_docs = [
@@ -153,12 +243,12 @@ class RAGWorkflow:
             ),
         ]
 
-        if self.vector_store:
-            self.vector_store.add_documents(sample_docs)
-            if hasattr(self.vector_store, "persist"):
-                self.vector_store.persist()
-            self.logger.info("Loaded %s sample documents into the vector store", len(sample_docs))
-            self._emit_event("ingestion.sample_loaded", {"count": len(sample_docs)})
+        ingested_chunks = self.ingest_documents(sample_docs)
+        self.logger.info("Loaded %s sample documents into the retrieval suite", len(sample_docs))
+        self._emit_event(
+            "ingestion.sample_loaded",
+            {"documents": len(sample_docs), "chunks": ingested_chunks},
+        )
 
     def _get_index_count(self) -> int:
         if not self.vector_store:
@@ -171,6 +261,13 @@ class RAGWorkflow:
             except Exception:
                 return 0
         return 0
+
+    def _ensure_vector_store_seeded(self) -> None:
+        if not self.vector_store:
+            return
+
+        if self._get_index_count() == 0:
+            self._load_sample_documents()
 
     def intake_query(self, state: RAGState) -> RAGState:
         question = state.get("question", "").strip()
@@ -205,12 +302,15 @@ class RAGWorkflow:
 
     def multi_retriever_fanout(self, state: RAGState) -> RAGState:
         status_messages = list(state.get("status_messages", []))
-        retriever_weights = dict(state.get("retriever_weights", {"semantic": 1.0}))
+        retriever_weights = dict(state.get("retriever_weights", {}))
 
-        active_retrievers: List[str] = ["semantic"]
-        if self.config.enable_graph_retriever:
-            active_retrievers.append("graph")
-            retriever_weights.setdefault("graph", 1.0)
+        dispatch_order = self._retriever_order or ["semantic"]
+        for name in dispatch_order:
+            retriever_weights.setdefault(name, 1.0)
+
+        active_retrievers = [name for name in dispatch_order if retriever_weights.get(name, 0.0) > 0]
+        if not active_retrievers:
+            active_retrievers = dispatch_order[:1]
 
         status_messages.append(
             f"🔀 Fan-out to retrievers: {', '.join(active_retrievers)}"
@@ -224,14 +324,14 @@ class RAGWorkflow:
                 documents = self._run_retriever(retriever_name, state, retriever_weights)
                 retriever_results[retriever_name] = documents
                 status_messages.append(
-                    f"🔎 {retriever_name.title()} retriever returned {len(documents)} documents"
+                    f"🔎 {retriever_name.replace('_', ' ').title()} retriever returned {len(documents)} documents"
                 )
                 self._emit_event(
                     "retriever.success",
                     {"name": retriever_name, "count": len(documents)},
                 )
             except Exception as error:  # pragma: no cover - defensive branch
-                message = f"❌ {retriever_name.title()} retriever failed: {error}"
+                message = f"❌ {retriever_name.replace('_', ' ').title()} retriever failed: {error}"
                 status_messages.append(message)
                 errors.append(f"{retriever_name}: {error}")
                 self.logger.warning(message)
@@ -255,29 +355,96 @@ class RAGWorkflow:
         state: RAGState,
         weights: Dict[str, float],
     ) -> List[Document]:
+        question = state.get("normalized_question") or state.get("question", "")
+        handler = self._retriever_dispatch.get(retriever_name)
+        if not handler:
+            raise ValueError(f"Unknown retriever '{retriever_name}'")
+
+        weight = float(weights.get(retriever_name, 1.0))
+        if weight <= 0:
+            return []
+
+        return handler(question, weight)
+
+    def _semantic_retrieval(self, question: str, weight: float) -> List[Document]:
+        if not question.strip():
+            return []
         if not self.vector_store:
             raise RuntimeError("Vector store not initialized")
 
-        question = state.get("normalized_question") or state.get("question", "")
+        effective_weight = max(weight, 0.0)
+        if effective_weight <= 0:
+            return []
 
-        if retriever_name == "semantic":
-            return self._semantic_retrieval(question, weights.get("semantic", 1.0))
-        if retriever_name == "graph":
-            return self._graph_retrieval(question, weights.get("graph", 1.0))
+        top_k = max(1, min(int(self.config.retriever_top_k * max(effective_weight, 0.1)), 50))
+        documents: List[Document] = []
 
-        raise ValueError(f"Unknown retriever '{retriever_name}'")
-
-    def _semantic_retrieval(self, question: str, weight: float) -> List[Document]:
-        top_k = max(1, min(int(self.config.retriever_top_k * max(weight, 0.1)), 20))
-        return self.vector_store.similarity_search(question, k=top_k)
-
-    def _graph_retrieval(self, question: str, weight: float) -> List[Document]:
-        top_k = max(1, min(int(self.config.graph_retriever_top_k * max(weight, 0.1)), 20))
         with_score = getattr(self.vector_store, "similarity_search_with_score", None)
         if callable(with_score):
             results = with_score(question, k=top_k)
-            return [doc for doc, _ in results]
-        return self.vector_store.similarity_search(question, k=top_k)
+            for doc, score in results:
+                metadata = dict(doc.metadata or {})
+                try:
+                    metadata["score"] = float(score)
+                except (TypeError, ValueError):
+                    metadata["score"] = score
+                metadata["retriever"] = "semantic"
+                documents.append(Document(page_content=doc.page_content, metadata=metadata))
+            return documents
+
+        raw_docs = self.vector_store.similarity_search(question, k=top_k)
+        for doc in raw_docs:
+            metadata = dict(doc.metadata or {})
+            metadata.setdefault("score", 0.0)
+            metadata["retriever"] = "semantic"
+            documents.append(Document(page_content=doc.page_content, metadata=metadata))
+        return documents
+
+    def _pinecone_retrieval(self, question: str, weight: float) -> List[Document]:
+        if not self.pinecone_retriever:
+            raise RuntimeError("Pinecone retriever not configured")
+        if not question.strip():
+            return []
+
+        effective_weight = max(weight, 0.0)
+        if effective_weight <= 0:
+            return []
+
+        top_k = max(1, min(int(self.config.pinecone_top_k * max(effective_weight, 0.1)), 50))
+        results = self.pinecone_retriever.retrieve(question, k=top_k)
+        return [result.to_document() for result in results]
+
+    def _sentence_window_retrieval(self, question: str, weight: float) -> List[Document]:
+        if not self.sentence_window_retriever:
+            raise RuntimeError("Sentence window retriever not configured")
+        if not question.strip():
+            return []
+
+        effective_weight = max(weight, 0.0)
+        if effective_weight <= 0:
+            return []
+
+        top_k = max(1, min(int(self.config.sentence_retriever_top_k * max(effective_weight, 0.1)), 50))
+        results = self.sentence_window_retriever.retrieve(question, k=top_k)
+        return [result.to_document() for result in results]
+
+    def _graph_retrieval(self, question: str, weight: float) -> List[Document]:
+        if not self.graph_retriever:
+            raise RuntimeError("Graph retriever not configured")
+        if not question.strip():
+            return []
+
+        effective_weight = max(weight, 0.0)
+        if effective_weight <= 0:
+            return []
+
+        top_k = max(1, min(int(self.config.graph_retriever_top_k * max(effective_weight, 0.1)), 50))
+        results = self.graph_retriever.retrieve(
+            question,
+            k=top_k,
+            max_depth=self.config.graph_max_depth,
+        )
+        return [result.to_document() for result in results]
 
     def fuse_and_rank(self, state: RAGState) -> RAGState:
         status_messages = list(state.get("status_messages", []))
@@ -510,7 +677,7 @@ class RAGWorkflow:
         }
 
     def run(self, question: str, retriever_weights: Optional[Dict[str, float]] = None) -> RAGState:
-        weights = retriever_weights or {"semantic": 1.0}
+        weights = dict(retriever_weights or {})
         initial_state: RAGState = {
             "question": question,
             "normalized_question": "",
@@ -530,7 +697,7 @@ class RAGWorkflow:
         return self.workflow.invoke(initial_state)
 
     def stream(self, question: str, retriever_weights: Optional[Dict[str, float]] = None):
-        weights = retriever_weights or {"semantic": 1.0}
+        weights = dict(retriever_weights or {})
         initial_state: RAGState = {
             "question": question,
             "normalized_question": "",
@@ -554,18 +721,46 @@ class RAGWorkflow:
         if not self.vector_store:
             raise RuntimeError("Vector store not initialized")
 
+        if not documents:
+            return 0
+
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=self.config.chunk_size,
             chunk_overlap=self.config.chunk_overlap,
         )
 
-        split_docs = text_splitter.split_documents(documents)
-        self.vector_store.add_documents(split_docs)
+        original_documents = list(documents)
+        split_docs = text_splitter.split_documents(original_documents)
 
-        if hasattr(self.vector_store, "persist"):
-            self.vector_store.persist()
+        if split_docs:
+            self.vector_store.add_documents(split_docs)
+            if hasattr(self.vector_store, "persist"):
+                self.vector_store.persist()
 
-        self._emit_event("ingestion.custom", {"count": len(split_docs)})
+        if self.pinecone_pipeline and split_docs:
+            try:
+                if self.pinecone_index_manager:
+                    self.pinecone_index_manager.ensure_index(metric=self.config.pinecone_metric)
+                self.pinecone_pipeline.upsert_documents(split_docs)
+            except Exception as error:  # pragma: no cover - defensive
+                self.logger.warning("Pinecone upsert failed: %s", error)
+
+        if self.sentence_window_retriever:
+            try:
+                self.sentence_window_retriever.index_documents(original_documents)
+            except Exception as error:  # pragma: no cover - defensive
+                self.logger.warning("Sentence window indexing failed: %s", error)
+
+        if self.graph_retriever:
+            try:
+                self.graph_retriever.index_documents(original_documents)
+            except Exception as error:  # pragma: no cover - defensive
+                self.logger.warning("Graph indexing failed: %s", error)
+
+        self._emit_event(
+            "ingestion.custom",
+            {"documents": len(original_documents), "chunks": len(split_docs)},
+        )
         return len(split_docs)
 
     def refresh_index(self) -> bool:

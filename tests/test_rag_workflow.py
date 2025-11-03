@@ -37,6 +37,7 @@ def mock_workflow(mock_config: RAGConfig, sample_documents: list[Document]) -> R
     vector_store.similarity_search_with_score.return_value = [
         (doc, 0.8) for doc in sample_documents
     ]
+    vector_store.add_documents = MagicMock()
     vector_store.persist = MagicMock()
 
     workflow = RAGWorkflow(
@@ -55,21 +56,29 @@ def test_multi_retriever_fanout_includes_graph_when_enabled(
     mock_workflow: RAGWorkflow, sample_documents: list[Document]
 ) -> None:
     mock_workflow.config.enable_graph_retriever = True
+    mock_workflow.graph_retriever.reset()
+    mock_workflow.graph_retriever.index_documents(sample_documents)
+    mock_workflow._initialize_retrievers()
 
     state: RAGState = {
         "question": "What is enterprise architecture?",
         "normalized_question": "What is enterprise architecture?",
         "status_messages": [],
         "retriever_results": {},
-        "retriever_weights": {"semantic": 1.0},
+        "retriever_weights": {},
         "errors": [],
     }
 
     result = mock_workflow.multi_retriever_fanout(state)
 
     assert "semantic" in result["retriever_results"]
+    semantic_results = result["retriever_results"]["semantic"]
+    assert all(doc.metadata.get("retriever") == "semantic" for doc in semantic_results)
+
     assert "graph" in result["retriever_results"]
-    assert len(result["retriever_results"]["graph"]) == len(sample_documents)
+    graph_results = result["retriever_results"]["graph"]
+    assert graph_results  # graph retriever returns contextual sentences
+    assert all(doc.metadata.get("retriever") == "graph" for doc in graph_results)
     assert any("graph" in message.lower() for message in result["status_messages"])
 
 
@@ -124,6 +133,10 @@ def test_ingest_documents_splits_and_persists(
 ) -> None:
     mock_workflow.vector_store.add_documents = MagicMock()
     mock_workflow.vector_store.persist = MagicMock()
+    mock_workflow.pinecone_pipeline = MagicMock()
+    mock_workflow.pinecone_index_manager = MagicMock()
+    mock_workflow.sentence_window_retriever = MagicMock()
+    mock_workflow.graph_retriever = MagicMock()
 
     with patch("rag_workflow.RecursiveCharacterTextSplitter") as mock_splitter_cls:
         mock_splitter = MagicMock()
@@ -135,6 +148,14 @@ def test_ingest_documents_splits_and_persists(
     assert ingested == len(sample_documents)
     mock_workflow.vector_store.add_documents.assert_called_once_with(sample_documents)
     mock_workflow.vector_store.persist.assert_called_once()
+    mock_workflow.pinecone_index_manager.ensure_index.assert_called_once()
+    assert (
+        mock_workflow.pinecone_index_manager.ensure_index.call_args.kwargs["metric"]
+        == mock_workflow.config.pinecone_metric
+    )
+    mock_workflow.pinecone_pipeline.upsert_documents.assert_called_once_with(sample_documents)
+    mock_workflow.sentence_window_retriever.index_documents.assert_called_once_with(sample_documents)
+    mock_workflow.graph_retriever.index_documents.assert_called_once_with(sample_documents)
 
 
 def test_refresh_index_invokes_persist(mock_workflow: RAGWorkflow) -> None:
