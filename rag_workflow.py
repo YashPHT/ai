@@ -16,6 +16,7 @@ from langgraph.graph import END, StateGraph
 
 from config import RAGConfig
 from fusion import FusionPipeline, FusionReranker, KeywordOverlapReranker
+from generation import GeminiRAG
 from retrieval import (
     GraphRetriever,
     PineconeEmbeddingPipeline,
@@ -77,6 +78,7 @@ class RAGWorkflow:
 
         self.embeddings = embeddings or GoogleGenerativeAIEmbeddings(model="models/embedding-001")
         self.llm = llm or ChatGoogleGenerativeAI(model="gemini-pro", temperature=0.3)
+        self.gemini_rag = GeminiRAG(config=self.config, llm=self.llm)
 
         self.vector_store = vector_store
         self.pinecone_index_manager = pinecone_manager
@@ -541,249 +543,150 @@ class RAGWorkflow:
             "fallback_reason": "no_documents",
         }
 
-    def generate_context(self, state: RAGState) -> RAGState:
-        documents = state.get("fused_documents", [])
-        status_messages = list(state.get("status_messages", []))
-        status_messages.append("📝 Generating contextual summary from fused documents")
-
-        context_parts: List[str] = []
-        citations: List[Dict[str, Any]] = []
-
-        for index, document in enumerate(documents, start=1):
-            context_parts.append(f"[{index}] {document.page_content}")
-            metadata = document.metadata or {}
-            citations.append(
-                {
-                    "id": index,
-                    "source": metadata.get("source", "Unknown"),
-                    "page": metadata.get("page", "N/A"),
-                    "content": (
-                        document.page_content[:200] + "..."
-                        if len(document.page_content) > 200
-                        else document.page_content
-                    ),
-                }
-            )
-
-        context = "\n\n".join(context_parts)
-        status_messages.append(f"✓ Generated context with {len(citations)} citations")
-
-        return {
-            **state,
-            "context": context,
-            "citations": citations,
-            "status_messages": status_messages,
-        }
-
     def generate_answer(self, state: RAGState) -> RAGState:
+        question = state.get("question", "")
+        documents = state.get("fused_documents")
+        if not documents:
+            return {**state, "answer": "No documents found to answer the question."}
+
         status_messages = list(state.get("status_messages", []))
-        status_messages.append("🤖 Generating answer with Gemini")
+        status_messages.append("🧠 Generating final answer...")
 
-        prompt = (
-            "You are a helpful enterprise Q&A assistant. Answer the question based on the provided context.\n"
-            "Include citation numbers [1], [2], etc. in your answer to reference the sources.\n\n"
-            f"Context:\n{state.get('context', '')}\n\n"
-            f"Question: {state.get('question', '')}\n\n"
-            "Answer (with citations):"
-        )
-
-        try:
-            response = self.llm.invoke(prompt)
-            answer = getattr(response, "content", str(response))
-            status_messages.append("✓ Answer generated successfully")
-            self._emit_event("llm.success", {"model": "gemini-pro"})
-        except Exception as error:
-            answer = f"Error generating answer: {error}"
-            status_messages.append(f"❌ LLM generation failed: {error}")
-            self._emit_event("llm.error", {"error": str(error)})
-
-        return {**state, "answer": answer, "status_messages": status_messages}
-
-    def format_response(self, state: RAGState) -> RAGState:
-        status_messages = list(state.get("status_messages", []))
-        answer = state.get("answer", "").strip()
-
-        if not answer:
-            answer = (
-                "I was unable to produce an answer. Please try rephrasing the question or ingesting more data."
-            )
-            status_messages.append("ℹ️ Returned fallback answer due to empty response")
-        else:
-            status_messages.append("✅ Response ready for presentation")
-
-        citations = state.get("citations", [])
-        for index, citation in enumerate(citations, start=1):
-            citation["id"] = index
+        generation_result = self.gemini_rag.generate_answer(question, documents)
 
         self._emit_event(
-            "workflow.complete",
+            "generation.answer",
             {
-                "citations": len(citations),
-                "fallback": state.get("fallback_reason") is not None,
+                "question": question,
+                "answer": generation_result["answer"],
+                "citations": generation_result["citations"],
             },
+        )
+        return {
+            **state,
+            "answer": generation_result["answer"],
+            "citations": generation_result["citations"],
+            "status_messages": status_messages,
+        }
+
+    def _should_fallback(self, state: RAGState) -> bool:
+        return not state.get("fused_documents")
+
+    def fallback_answer(self, state: RAGState) -> RAGState:
+        question = state.get("question", "")
+        status_messages = list(state.get("status_messages", []))
+        errors = list(state.get("errors", []))
+        error_str = "\n".join(errors)
+        fallback_reason = "No documents were retrieved to answer the query."
+
+        self.logger.warning("No documents retrieved for: %s", question)
+        status_messages.append(f"⚠️ {fallback_reason}")
+        self._emit_event(
+            "generation.fallback",
+            {"question": question, "errors": error_str, "reason": fallback_reason},
         )
 
         return {
             **state,
-            "answer": answer,
-            "citations": citations,
+            "answer": "I could not find an answer based on the available information.",
+            "citations": [],
             "status_messages": status_messages,
+            "fallback_reason": fallback_reason,
         }
 
-    def _build_workflow(self):
-        graph = StateGraph(RAGState)
-
-        def register_node(name: str, handler: Callable[[RAGState], RAGState]) -> None:
-            graph.add_node(name, handler)
-            self._graph_nodes.append(name)
-
-        def register_edge(source: str, target: str, condition: Optional[str] = None) -> None:
-            graph.add_edge(source, target)
-            self._graph_edges.append({"source": source, "target": target, "condition": condition})
-
-        register_node("intake_query", self.intake_query)
-        register_node("ensure_ingestion_ready", self.ensure_ingestion_ready)
-        register_node("multi_retriever_fanout", self.multi_retriever_fanout)
-        register_node("fuse_and_rank", self.fuse_and_rank)
-        register_node("handle_no_results", self.handle_no_results)
-        register_node("generate_context", self.generate_context)
-        register_node("generate_answer", self.generate_answer)
-        register_node("format_response", self.format_response)
-
-        graph.set_entry_point("intake_query")
-
-        register_edge("intake_query", "ensure_ingestion_ready")
-        register_edge("ensure_ingestion_ready", "multi_retriever_fanout")
-        register_edge("multi_retriever_fanout", "fuse_and_rank")
-
-        graph.add_conditional_edges(
-            "fuse_and_rank",
-            self._route_post_fusion,
-            {
-                "continue": "generate_context",
-                "fallback": "handle_no_results",
-            },
-        )
-        self._graph_edges.append(
-            {"source": "fuse_and_rank", "target": "generate_context", "condition": "continue"}
-        )
-        self._graph_edges.append(
-            {"source": "fuse_and_rank", "target": "handle_no_results", "condition": "fallback"}
-        )
-
-        register_edge("handle_no_results", "format_response")
-        register_edge("generate_context", "generate_answer")
-        register_edge("generate_answer", "format_response")
-        register_edge("format_response", END)
-
-        return graph.compile()
-
-    def describe_graph(self) -> Dict[str, Sequence[Dict[str, Optional[str]]]]:
-        return {
-            "nodes": [{"name": node} for node in self._graph_nodes],
-            "edges": self._graph_edges,
-        }
-
-    def run(self, question: str, retriever_weights: Optional[Dict[str, float]] = None) -> RAGState:
-        weights = dict(retriever_weights or {})
-        initial_state: RAGState = {
-            "question": question,
-            "normalized_question": "",
-            "documents": [],
-            "fused_documents": [],
-            "context": "",
-            "answer": "",
-            "citations": [],
-            "status_messages": [],
-            "retriever_weights": weights,
-            "retriever_results": {},
-            "fusion_diagnostics": {},
-            "errors": [],
-            "active_retrievers": [],
-        }
-
-        return self.workflow.invoke(initial_state)
-
-    def stream(self, question: str, retriever_weights: Optional[Dict[str, float]] = None):
-        weights = dict(retriever_weights or {})
-        initial_state: RAGState = {
-            "question": question,
-            "normalized_question": "",
-            "documents": [],
-            "fused_documents": [],
-            "context": "",
-            "answer": "",
-            "citations": [],
-            "status_messages": [],
-            "retriever_weights": weights,
-            "retriever_results": {},
-            "fusion_diagnostics": {},
-            "errors": [],
-            "active_retrievers": [],
-        }
-
-        for state in self.workflow.stream(initial_state):
-            yield state
-
-    def ingest_documents(self, documents: Sequence[IngestibleDocument]) -> int:
-        if not self.vector_store:
-            raise RuntimeError("Vector store not initialized")
-
+    def ingest_documents(
+        self, documents: Sequence[IngestibleDocument]
+    ) -> int:
+        """Ingests a list of documents into the RAG system."""
         if not documents:
             return 0
 
-        canonical_documents = as_langchain_documents(
-            list(documents),
-            chunk_size=self.config.chunk_size,
-            chunk_overlap=self.config.chunk_overlap,
-            chunk_documents=False,
-        )
+        self.logger.info("Ingesting %s documents", len(documents))
 
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=self.config.chunk_size,
             chunk_overlap=self.config.chunk_overlap,
+            length_function=len,
         )
 
-        to_split = [doc for doc in canonical_documents if not doc.metadata.get("chunk_id")]
-        split_docs = text_splitter.split_documents(to_split) if to_split else []
-        passthrough_docs = [doc for doc in canonical_documents if doc.metadata.get("chunk_id")]
-        prepared_docs = split_docs + passthrough_docs
+        langchain_docs = as_langchain_documents(documents)
+        chunks = text_splitter.split_documents(langchain_docs)
 
-        if prepared_docs:
-            self.vector_store.add_documents(prepared_docs)
-            if hasattr(self.vector_store, "persist"):
-                self.vector_store.persist()
+        if self.vector_store:
+            self.vector_store.add_documents(chunks)
 
-        if self.pinecone_pipeline and prepared_docs:
+        if self.pinecone_pipeline:
             try:
-                if self.pinecone_index_manager:
-                    self.pinecone_index_manager.ensure_index(metric=self.config.pinecone_metric)
-                self.pinecone_pipeline.upsert_documents(prepared_docs)
-            except Exception as error:  # pragma: no cover - defensive
-                self.logger.warning("Pinecone upsert failed: %s", error)
+                self.pinecone_pipeline.run(langchain_docs)
+            except Exception as error:
+                self.logger.warning("Pinecone ingestion failed: %s", error)
 
-        if self.sentence_window_retriever and canonical_documents:
-            try:
-                self.sentence_window_retriever.index_documents(canonical_documents)
-            except Exception as error:  # pragma: no cover - defensive
-                self.logger.warning("Sentence window indexing failed: %s", error)
+        self.logger.info("Ingested %s chunks", len(chunks))
+        self._emit_event("ingestion.completed", {"documents": len(documents), "chunks": len(chunks)})
 
-        if self.graph_retriever and canonical_documents:
-            try:
-                self.graph_retriever.index_documents(canonical_documents)
-            except Exception as error:  # pragma: no cover - defensive
-                self.logger.warning("Graph indexing failed: %s", error)
+        return len(chunks)
 
-        self._emit_event(
-            "ingestion.custom",
-            {"documents": len(canonical_documents), "chunks": len(prepared_docs)},
+    def _build_workflow(self) -> StateGraph:
+        workflow = StateGraph(RAGState)
+
+        self._graph_nodes = [
+            "intake_query",
+            "ensure_ingestion_ready",
+            "multi_retriever_fanout",
+            "fuse_and_rank",
+            "generate_answer",
+            "handle_no_results",
+        ]
+
+        workflow.add_node("intake_query", self.intake_query)
+        workflow.add_node("ensure_ingestion_ready", self.ensure_ingestion_ready)
+        workflow.add_node("multi_retriever_fanout", self.multi_retriever_fanout)
+        workflow.add_node("fuse_and_rank", self.fuse_and_rank)
+        workflow.add_node("generate_answer", self.generate_answer)
+        workflow.add_node("handle_no_results", self.handle_no_results)
+
+        workflow.set_entry_point("intake_query")
+        workflow.add_edge("intake_query", "ensure_ingestion_ready")
+        workflow.add_edge("ensure_ingestion_ready", "multi_retriever_fanout")
+        workflow.add_edge("multi_retriever_fanout", "fuse_and_rank")
+
+        workflow.add_conditional_edges(
+            "fuse_and_rank",
+            self._route_post_fusion,
+            {"continue": "generate_answer", "fallback": "handle_no_results"},
         )
-        return len(prepared_docs)
 
-    def refresh_index(self) -> bool:
-        if self.vector_store and hasattr(self.vector_store, "persist"):
-            self.vector_store.persist()
-            self._emit_event("ingestion.refresh", {"success": True})
-            return True
-        self._emit_event("ingestion.refresh", {"success": False})
-        return False
+        workflow.add_edge("generate_answer", END)
+        workflow.add_edge("handle_no_results", END)
+
+        self._graph_edges = [
+            {"source": "intake_query", "target": "ensure_ingestion_ready"},
+            {"source": "ensure_ingestion_ready", "target": "multi_retriever_fanout"},
+            {"source": "multi_retriever_fanout", "target": "fuse_and_rank"},
+            {"source": "fuse_and_rank", "target": "generate_answer"},
+            {"source": "fuse_and_rank", "target": "handle_no_results"},
+            {"source": "generate_answer", "target": "__end__"},
+            {"source": "handle_no_results", "target": "__end__"},
+        ]
+
+        return workflow.compile()
+
+    def stream(self, query: str, config: Optional[Dict[str, Any]] = None) -> Any:
+        self.logger.info("Streaming RAG workflow for query: %s", query)
+        config = config or {}
+        config.setdefault("recursion_limit", 10)
+
+        return self.workflow.stream(
+            {"question": query, "status_messages": [], "errors": []},
+            config=config,
+        )
+
+    def invoke(self, query: str, config: Optional[Dict[str, Any]] = None) -> RAGState:
+        self.logger.info("Invoking RAG workflow for query: %s", query)
+        config = config or {}
+        config.setdefault("recursion_limit", 10)
+
+        return self.workflow.invoke(
+            {"question": query, "status_messages": [], "errors": []},
+            config=config,
+        )
