@@ -161,9 +161,8 @@ def render_main_interface():
                     status_placeholder = st.empty()
                 
                 try:
-                    result = st.session_state.workflow.run(
-                        question,
-                        retriever_weights=st.session_state.retriever_weights
+                    result = st.session_state.workflow.invoke(
+                        question
                     )
                     
                     status_messages = result.get("status_messages", [])
@@ -217,9 +216,7 @@ def render_main_interface():
                     for citation in entry["citations"]:
                         with st.container():
                             st.markdown(f"""
-                            **[{citation['id']}]** `{citation['source']}` (Page {citation['page']})
-                            
-                            > {citation['content']}
+                            **Source:** `{citation.get('source', 'N/A')}` (Page {citation.get('page', 'N/A')})
                             """)
                 else:
                     st.info("No citations available")

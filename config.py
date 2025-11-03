@@ -1,9 +1,23 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
+
 from dotenv import load_dotenv
 
 load_dotenv()
+
+DEFAULT_GENERATION_PROMPT = """
+You are a helpful enterprise Q&A assistant. Answer the user's question based on the context provided.
+If the context does not contain the answer, state that you cannot answer the question.
+\n\n
+Context:
+{context}
+\n\n
+Question:
+{question}
+\n\n
+Answer:
+"""
 
 
 @dataclass
@@ -35,7 +49,8 @@ class RAGConfig:
     fusion_rrf_k: int = 60
     enable_fusion_reranker: bool = True
     fusion_reranker_weight: float = 0.35
-    
+    generation_prompt: str = field(default_factory=lambda: DEFAULT_GENERATION_PROMPT)
+
     @classmethod
     def from_env(cls) -> "RAGConfig":
         return cls(
@@ -66,8 +81,9 @@ class RAGConfig:
             fusion_rrf_k=int(os.getenv("FUSION_RRF_K", "60")),
             enable_fusion_reranker=os.getenv("ENABLE_FUSION_RERANKER", "true").lower() == "true",
             fusion_reranker_weight=float(os.getenv("FUSION_RERANKER_WEIGHT", "0.35")),
+            generation_prompt=os.getenv("GENERATION_PROMPT", DEFAULT_GENERATION_PROMPT),
         )
-    
+
     def validate(self) -> tuple[bool, Optional[str]]:
         if not self.google_api_key:
             return False, "GOOGLE_API_KEY is required"
@@ -97,4 +113,6 @@ class RAGConfig:
             return False, "FUSION_RERANKER_WEIGHT must be between 0 and 1"
         if self.enable_pinecone_retriever and not self.pinecone_api_key:
             return False, "PINECONE_API_KEY is required when Pinecone retriever is enabled"
+        if not self.generation_prompt:
+            return False, "GENERATION_PROMPT is required"
         return True, None
