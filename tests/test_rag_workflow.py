@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 from langchain.schema import Document
 
 from config import RAGConfig
+from fusion import FusionPipeline, KeywordOverlapReranker
 from rag_workflow import RAGWorkflow, RAGState
 
 
@@ -85,6 +86,11 @@ def test_workflow_executes_end_to_end(mock_workflow: RAGWorkflow) -> None:
     assert result["documents"]
     assert result["status_messages"][-1] == "✅ Response ready for presentation"
 
+    diagnostics = result["fusion_diagnostics"]
+    assert diagnostics["total_candidates"] >= len(result["documents"])
+    assert len(diagnostics["selected"]) == len(result["documents"])
+    assert diagnostics["token_usage"] >= 0
+
 
 def test_workflow_fallback_when_no_documents(mock_config: RAGConfig) -> None:
     llm = MagicMock()
@@ -136,6 +142,40 @@ def test_refresh_index_invokes_persist(mock_workflow: RAGWorkflow) -> None:
 
     assert mock_workflow.refresh_index() is True
     mock_workflow.vector_store.persist.assert_called_once()
+
+
+def test_fusion_token_budget_diagnostics(
+    mock_workflow: RAGWorkflow, sample_documents: list[Document]
+) -> None:
+    mock_workflow.config.fusion_token_budget = 5
+    reranker = (
+        KeywordOverlapReranker() if mock_workflow.config.enable_fusion_reranker else None
+    )
+    mock_workflow.fusion_pipeline = FusionPipeline(
+        token_budget=mock_workflow.config.fusion_token_budget,
+        max_results=mock_workflow.config.retriever_top_k,
+        rrf_k=mock_workflow.config.fusion_rrf_k,
+        reranker=reranker,
+        reranker_weight=mock_workflow.config.fusion_reranker_weight,
+        logger=mock_workflow.logger,
+    )
+
+    state: RAGState = {
+        "question": "What is enterprise architecture?",
+        "normalized_question": "What is enterprise architecture?",
+        "status_messages": [],
+        "retriever_results": {"semantic": sample_documents},
+        "retriever_weights": {"semantic": 1.0},
+    }
+
+    updated = mock_workflow.fuse_and_rank(state)
+
+    assert len(updated["fused_documents"]) == 1
+    diagnostics = updated["fusion_diagnostics"]
+    assert diagnostics["omitted"]
+    assert diagnostics["token_usage"] <= mock_workflow.config.fusion_token_budget
+    assert any("⚖️ Context token usage" in message for message in updated["status_messages"])
+    assert diagnostics["omitted"][0]["rank"] == 2
 
 
 def test_describe_graph_contains_expected_nodes(mock_workflow: RAGWorkflow) -> None:
