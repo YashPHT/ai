@@ -13,6 +13,9 @@ def test_config_from_env():
     assert config.google_api_key == "test_key"
     assert config.environment == "test"
     assert config.retriever_top_k == 10
+    assert config.enable_pinecone_retriever is False
+    assert config.sentence_window_size == 1
+    assert config.graph_max_depth == 2
 
 
 def test_config_validation_success():
@@ -37,3 +40,15 @@ def test_config_validation_invalid_top_k():
     
     assert is_valid is False
     assert "RETRIEVER_TOP_K" in error
+
+
+def test_config_validation_requires_pinecone_api_key_when_enabled():
+    config = RAGConfig(
+        google_api_key="valid_key",
+        enable_pinecone_retriever=True,
+        pinecone_api_key="",
+    )
+    is_valid, error = config.validate()
+
+    assert is_valid is False
+    assert "PINECONE_API_KEY" in error
