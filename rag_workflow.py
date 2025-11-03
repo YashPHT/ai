@@ -1,9 +1,14 @@
 import logging
 import os
 from operator import add
-from typing import Annotated, Any, Callable, Dict, List, Optional, Sequence, TypedDict
+from typing import Annotated, Any, Callable, Dict, List, Optional, Sequence, TypedDict, Union
 
 from langchain.schema import Document
+from ingestion import (
+    Chunk as IngestionChunk,
+    Document as IngestionDocument,
+    as_langchain_documents,
+)
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import Chroma
@@ -37,6 +42,9 @@ class RAGState(TypedDict, total=False):
     errors: Annotated[List[str], add]
     active_retrievers: List[str]
     fallback_reason: Optional[str]
+
+
+IngestibleDocument = Union[Document, IngestionDocument, IngestionChunk]
 
 
 class RAGWorkflow:
@@ -717,51 +725,60 @@ class RAGWorkflow:
         for state in self.workflow.stream(initial_state):
             yield state
 
-    def ingest_documents(self, documents: List[Document]) -> int:
+    def ingest_documents(self, documents: Sequence[IngestibleDocument]) -> int:
         if not self.vector_store:
             raise RuntimeError("Vector store not initialized")
 
         if not documents:
             return 0
 
+        canonical_documents = as_langchain_documents(
+            list(documents),
+            chunk_size=self.config.chunk_size,
+            chunk_overlap=self.config.chunk_overlap,
+            chunk_documents=False,
+        )
+
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=self.config.chunk_size,
             chunk_overlap=self.config.chunk_overlap,
         )
 
-        original_documents = list(documents)
-        split_docs = text_splitter.split_documents(original_documents)
+        to_split = [doc for doc in canonical_documents if not doc.metadata.get("chunk_id")]
+        split_docs = text_splitter.split_documents(to_split) if to_split else []
+        passthrough_docs = [doc for doc in canonical_documents if doc.metadata.get("chunk_id")]
+        prepared_docs = split_docs + passthrough_docs
 
-        if split_docs:
-            self.vector_store.add_documents(split_docs)
+        if prepared_docs:
+            self.vector_store.add_documents(prepared_docs)
             if hasattr(self.vector_store, "persist"):
                 self.vector_store.persist()
 
-        if self.pinecone_pipeline and split_docs:
+        if self.pinecone_pipeline and prepared_docs:
             try:
                 if self.pinecone_index_manager:
                     self.pinecone_index_manager.ensure_index(metric=self.config.pinecone_metric)
-                self.pinecone_pipeline.upsert_documents(split_docs)
+                self.pinecone_pipeline.upsert_documents(prepared_docs)
             except Exception as error:  # pragma: no cover - defensive
                 self.logger.warning("Pinecone upsert failed: %s", error)
 
-        if self.sentence_window_retriever:
+        if self.sentence_window_retriever and canonical_documents:
             try:
-                self.sentence_window_retriever.index_documents(original_documents)
+                self.sentence_window_retriever.index_documents(canonical_documents)
             except Exception as error:  # pragma: no cover - defensive
                 self.logger.warning("Sentence window indexing failed: %s", error)
 
-        if self.graph_retriever:
+        if self.graph_retriever and canonical_documents:
             try:
-                self.graph_retriever.index_documents(original_documents)
+                self.graph_retriever.index_documents(canonical_documents)
             except Exception as error:  # pragma: no cover - defensive
                 self.logger.warning("Graph indexing failed: %s", error)
 
         self._emit_event(
             "ingestion.custom",
-            {"documents": len(original_documents), "chunks": len(split_docs)},
+            {"documents": len(canonical_documents), "chunks": len(prepared_docs)},
         )
-        return len(split_docs)
+        return len(prepared_docs)
 
     def refresh_index(self) -> bool:
         if self.vector_store and hasattr(self.vector_store, "persist"):
