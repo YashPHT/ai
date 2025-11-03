@@ -10,6 +10,7 @@ from langchain_community.vectorstores import Chroma
 from langgraph.graph import END, StateGraph
 
 from config import RAGConfig
+from fusion import FusionPipeline, FusionReranker, KeywordOverlapReranker
 
 
 class RAGState(TypedDict, total=False):
@@ -25,6 +26,7 @@ class RAGState(TypedDict, total=False):
     status_messages: Annotated[List[str], add]
     retriever_weights: Dict[str, float]
     retriever_results: Dict[str, List[Document]]
+    fusion_diagnostics: Dict[str, Any]
     errors: Annotated[List[str], add]
     active_retrievers: List[str]
     fallback_reason: Optional[str]
@@ -40,6 +42,7 @@ class RAGWorkflow:
         llm: Optional[ChatGoogleGenerativeAI] = None,
         embeddings: Optional[GoogleGenerativeAIEmbeddings] = None,
         vector_store: Optional[Chroma] = None,
+        fusion_reranker: Optional[FusionReranker] = None,
     ) -> None:
         self.config = config
         os.environ["GOOGLE_API_KEY"] = config.google_api_key
@@ -60,6 +63,19 @@ class RAGWorkflow:
 
         if self.vector_store is None:
             self._initialize_vector_store()
+
+        reranker_instance = fusion_reranker
+        if reranker_instance is None and self.config.enable_fusion_reranker:
+            reranker_instance = KeywordOverlapReranker()
+
+        self.fusion_pipeline = FusionPipeline(
+            token_budget=self.config.fusion_token_budget,
+            max_results=self.config.retriever_top_k,
+            rrf_k=self.config.fusion_rrf_k,
+            reranker=reranker_instance,
+            reranker_weight=self.config.fusion_reranker_weight,
+            logger=self.logger,
+        )
 
         self._graph_nodes: List[str] = []
         self._graph_edges: List[Dict[str, Optional[str]]] = []
@@ -263,40 +279,57 @@ class RAGWorkflow:
             return [doc for doc, _ in results]
         return self.vector_store.similarity_search(question, k=top_k)
 
-    @staticmethod
-    def _document_key(doc: Document) -> str:
-        source = doc.metadata.get("source", "unknown") if doc.metadata else "unknown"
-        page = doc.metadata.get("page", "?") if doc.metadata else "?"
-        return f"{source}:{page}:{hash(doc.page_content)}"
-
     def fuse_and_rank(self, state: RAGState) -> RAGState:
         status_messages = list(state.get("status_messages", []))
         retriever_results = state.get("retriever_results", {})
         retriever_weights = state.get("retriever_weights", {"semantic": 1.0})
+        question = state.get("normalized_question") or state.get("question", "")
 
-        scored_docs: Dict[str, Dict[str, Any]] = {}
-        total_candidates = 0
+        fusion_result = self.fusion_pipeline.fuse(
+            question,
+            retriever_results,
+            retriever_weights,
+        )
 
-        for retriever_name, documents in retriever_results.items():
-            weight = retriever_weights.get(retriever_name, 1.0)
-            for rank, document in enumerate(documents):
-                total_candidates += 1
-                key = self._document_key(document)
-                base_score = weight / (rank + 1)
-                if key not in scored_docs:
-                    scored_docs[key] = {"doc": document, "score": 0.0}
-                scored_docs[key]["score"] += base_score
+        fused_documents = fusion_result.documents
 
-        fused_documents = [
-            entry["doc"]
-            for entry in sorted(
-                scored_docs.values(), key=lambda item: item["score"], reverse=True
-            )
-        ]
+        message = (
+            f"🧮 Fused {fusion_result.total_candidates} documents into "
+            f"{len(fused_documents)} ranked results"
+        )
+        if fusion_result.truncated:
+            message += f" (trimmed {len(fusion_result.truncated)} for token budget)"
+        status_messages.append(message)
 
-        fused_documents = fused_documents[: max(1, self.config.retriever_top_k)]
-        status_messages.append(
-            f"🧮 Fused {total_candidates} documents into {len(fused_documents)} ranked results"
+        if fusion_result.metadata.get("reranker_applied"):
+            status_messages.append("📊 Fusion reranker applied to refine ordering")
+
+        token_budget = fusion_result.metadata.get("token_budget")
+        if token_budget is not None:
+            usage_message = f"⚖️ Context token usage {fusion_result.token_usage}"
+            if token_budget:
+                usage_message += f"/{token_budget}"
+            if fusion_result.truncated:
+                usage_message += f" with {len(fusion_result.truncated)} omitted"
+            status_messages.append(usage_message)
+
+        diagnostics = {
+            **fusion_result.metadata,
+            "selected": fusion_result.selected,
+            "omitted": fusion_result.truncated,
+            "token_usage": fusion_result.token_usage,
+            "total_candidates": fusion_result.total_candidates,
+            "deduplicated_candidates": fusion_result.deduplicated_candidates,
+        }
+
+        self._emit_event(
+            "fusion.completed",
+            {
+                "selected": len(fusion_result.selected),
+                "token_usage": fusion_result.token_usage,
+                "total_candidates": fusion_result.total_candidates,
+                "deduplicated_candidates": fusion_result.deduplicated_candidates,
+            },
         )
 
         return {
@@ -304,6 +337,7 @@ class RAGWorkflow:
             "status_messages": status_messages,
             "fused_documents": fused_documents,
             "documents": fused_documents,
+            "fusion_diagnostics": diagnostics,
         }
 
     def _route_post_fusion(self, state: RAGState) -> str:
@@ -488,6 +522,7 @@ class RAGWorkflow:
             "status_messages": [],
             "retriever_weights": weights,
             "retriever_results": {},
+            "fusion_diagnostics": {},
             "errors": [],
             "active_retrievers": [],
         }
@@ -507,6 +542,7 @@ class RAGWorkflow:
             "status_messages": [],
             "retriever_weights": weights,
             "retriever_results": {},
+            "fusion_diagnostics": {},
             "errors": [],
             "active_retrievers": [],
         }
