@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from langchain.schema import Document as LCDocument
+from langchain_core.documents import Document as LCDocument
 
 from ai_rag.ingestion import (
     PDFIngestor,

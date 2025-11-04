@@ -13,7 +13,6 @@ langchain = ">=0.1.0"
 langchain-google-genai = ">=0.0.6"
 langgraph = ">=0.0.20"
 langchain-community = ">=0.0.10"
-chromadb = ">=0.4.22"
 sentence-transformers = ">=2.2.2"
 networkx = ">=3.1"
 python-dotenv = ">=1.0.0"
@@ -51,7 +50,6 @@ extend-exclude = '''
   | \.venv
   | build
   | dist
-  | chroma_db
   | data
 )/
 '''

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import List, Sequence
 
-from langchain.schema import Document as LCDocument
+from langchain_core.documents import Document as LCDocument
 
 from .models import Chunk, Document
 

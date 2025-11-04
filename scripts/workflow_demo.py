@@ -10,7 +10,7 @@ import os
 from pprint import pprint
 from unittest.mock import MagicMock
 
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 from ai_rag.core.settings import Settings
 from ai_rag.orchestration.rag_workflow import RAGWorkflow

@@ -3,13 +3,13 @@ import os
 from operator import add
 from typing import Annotated, Any, Callable, Dict, List, Optional, Sequence, TypedDict, Union
 
-from langchain.schema import Document
+from langchain_core.documents import Document
 from ai_rag.ingestion import (
     Chunk as IngestionChunk,
     Document as IngestionDocument,
     as_langchain_documents,
 )
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langgraph.graph import END, StateGraph
 

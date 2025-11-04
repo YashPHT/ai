@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import MagicMock, patch
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 from ai_rag.core.settings import Settings
 from ai_rag.ranking.fusion import FusionPipeline, KeywordOverlapReranker
@@ -93,7 +93,7 @@ def test_workflow_executes_end_to_end(mock_workflow: RAGWorkflow) -> None:
     assert result["answer"] == "Mock answer [1]"
     assert result["citations"]
     assert result["documents"]
-    assert result["status_messages"][-1] == "✅ Response ready for presentation"
+    assert result["status_messages"][-1] == "[SUCCESS] Response ready for presentation"
 
     diagnostics = result["fusion_diagnostics"]
     assert diagnostics["total_candidates"] >= len(result["documents"])
@@ -195,7 +195,7 @@ def test_fusion_token_budget_diagnostics(
     diagnostics = updated["fusion_diagnostics"]
     assert diagnostics["omitted"]
     assert diagnostics["token_usage"] <= mock_workflow.config.fusion_token_budget
-    assert any("⚖️ Context token usage" in message for message in updated["status_messages"])
+    assert any("Context token usage" in message for message in updated["status_messages"])
     assert diagnostics["omitted"][0]["rank"] == 2
 
 
