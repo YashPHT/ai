@@ -4,8 +4,8 @@ import logging
 import uuid
 from typing import Any, Dict, List, Optional, Sequence
 
-from langchain.schema import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from .types import RetrievalResult
 

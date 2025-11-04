@@ -1,6 +1,6 @@
 import streamlit as st
 from typing import Dict
-from langchain.schema import Document
+from langchain_core.documents import Document
 from ai_rag.core.logging_config import configure_logging
 from ai_rag.core.settings import settings
 from ai_rag.orchestration.rag_workflow import RAGWorkflow
@@ -118,7 +118,7 @@ def render_sidebar():
                         )
                         
                         num_chunks = st.session_state.workflow.ingest_documents([doc])
-                        st.success(f"✅ Ingested {num_chunks} document chunks!")
+                        st.success(f"SUCCESS: Ingested {num_chunks} document chunks!")
                     except Exception as e:
                         st.error(f"Error ingesting document: {e}")
         
@@ -243,7 +243,7 @@ def main():
         
         is_valid, error_msg = st.session_state.config.validate()
         if not is_valid:
-            st.error(f"❌ Configuration Error: {error_msg}")
+            st.error(f"Configuration Error: {error_msg}")
             st.info("Please set up your environment variables. See `.env.example` for reference.")
             st.stop()
         

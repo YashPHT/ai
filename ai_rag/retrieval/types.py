@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict
 
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 
 @dataclass(slots=True)

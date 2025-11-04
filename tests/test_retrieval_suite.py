@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 from ai_rag.retrieval import (
     GraphRetriever,

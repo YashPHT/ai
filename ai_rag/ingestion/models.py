@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from langchain.schema import Document as LCDocument
+from langchain_core.documents import Document as LCDocument
 
 from .utils import TextChunk, chunk_text, clean_text
 

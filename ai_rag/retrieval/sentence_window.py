@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Set
 
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 from .types import RetrievalResult
 
